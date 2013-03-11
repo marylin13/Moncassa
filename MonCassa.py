@@ -17,14 +17,6 @@ address = 'localhost:9160'
 keyspace = 'monitor'
 upertime_interval = 2592000
 
-#init maxID in database
-def init():
-    init_id = '\x00\x00'
-    pool = ConnectionPool(keyspace, [address])
-    col_fam_moncassa_meta_id = pycassa.ColumnFamily(pool, 'moncassa_meta_id') 
-    col_fam_moncassa_meta_id.insert('maxID', {'metric': init_id, 'tagk': init_id, 'tagv':init_id})
-    
-
 def write(metric , timestamp, value, tags):
     pool = ConnectionPool(keyspace, [address])
     upertime = timestamp/upertime_interval
