@@ -6,20 +6,36 @@ import pycassa
 from pycassa.pool import ConnectionPool
 import datetime
 import time
+import sys
+import struct
 
 dictAvg60 = defaultdict(lambda : {'counter': 0, 'avg': 0, 'timestamp': 0})
 dictAvg300 = defaultdict(lambda : {'counter': 0, 'avg': 0, 'timestamp': 0})
 dictAvg7200 = defaultdict(lambda : {'counter': 0, 'avg': 0, 'timestamp': 0})
 dictAvg86400 = defaultdict(lambda : {'counter': 0, 'avg': 0, 'timestamp': 0})
 address = 'localhost:9160'
+keyspace = 'monitor'
+upertime_interval = 2592000
 
+#init maxID in database
+def init():
+    init_id = '\x00\x00'
+    pool = ConnectionPool(keyspace, [address])
+    col_fam_moncassa_meta_id = pycassa.ColumnFamily(pool, 'moncassa_meta_id') 
+    col_fam_moncassa_meta_id.insert('maxID', {'metric': init_id, 'tagk': init_id, 'tagv':init_id})
+    
 
-def write(metric , timestamp, value):
-#    save to RawData
-    pool = ConnectionPool('Monitor', [address])
+def write(metric , timestamp, value, tags):
+    pool = ConnectionPool(keyspace, [address])
+    upertime = timestamp/upertime_interval
+#    get key from database, if some id is not exist, create new one
+    key = generate_key(metric, upertime, tags) 
+    
+#    save to rawdata
+    pool = ConnectionPool(keyspace, [address])
     col_fam_rawdata = pycassa.ColumnFamily(pool, 'rawdata') 
-    col_fam_rawdata.insert(metric, {timestamp: value})  
-
+    col_fam_rawdata.insert(key, {timestamp: value})  
+    
 #   save to rollups60，if in the same minute , update the memory. 
 #   if it is new minute, write the old value to cassandra, update the memory
     if dictAvg60[metric]['timestamp'] == 0:
@@ -31,7 +47,7 @@ def write(metric , timestamp, value):
         dictAvg60[metric]['counter'] += 1
     else:
         col_fam_rollups60 = pycassa.ColumnFamily(pool, 'rollups60')
-        col_fam_rollups60.insert(metric, {dictAvg60[metric]['timestamp']:  dictAvg60[metric]['avg']})  
+        col_fam_rollups60.insert(metric, {dictAvg60[metric]['timestamp']:  dictAvg60[key]['avg']})  
         dictAvg60[metric]['avg'] = value
         dictAvg60[metric]['counter'] = 1
     dictAvg60[metric]['timestamp'] = timestamp
@@ -46,7 +62,7 @@ def write(metric , timestamp, value):
         dictAvg300[metric]['counter'] += 1
     else:
         col_fam_rollups300 = pycassa.ColumnFamily(pool, 'rollups300')
-        col_fam_rollups300.insert(metric, {dictAvg300[metric]['timestamp']:  dictAvg300[metric]['avg']})  
+        col_fam_rollups300.insert(metric, {dictAvg300[metric]['timestamp']:  dictAvg300[key]['avg']})  
         dictAvg300[metric]['avg'] = value
         dictAvg300[metric]['counter'] = 1
     dictAvg300[metric]['timestamp'] = timestamp
@@ -61,7 +77,7 @@ def write(metric , timestamp, value):
         dictAvg7200[metric]['counter'] += 1
     else:
         col_fam_rollups7200 = pycassa.ColumnFamily(pool, 'rollups7200')
-        col_fam_rollups7200.insert(metric, {dictAvg7200[metric]['timestamp']:  dictAvg7200[metric]['avg']})  
+        col_fam_rollups7200.insert(metric, {dictAvg7200[metric]['timestamp']:  dictAvg7200[key]['avg']})  
         dictAvg7200[metric]['avg'] = value
         dictAvg7200[metric]['counter'] = 1
     dictAvg7200[metric]['timestamp'] = timestamp
@@ -76,39 +92,65 @@ def write(metric , timestamp, value):
         dictAvg86400[metric]['counter'] += 1
     else:
         col_fam_rollups86400 = pycassa.ColumnFamily(pool, 'rollups86400')
-        col_fam_rollups86400.insert(metric, {dictAvg86400[metric]['timestamp']:  dictAvg86400[metric]['avg']})  
+        col_fam_rollups86400.insert(metric, {dictAvg86400[metric]['timestamp']:  dictAvg86400[key]['avg']})  
         dictAvg86400[metric]['avg'] = value
         dictAvg86400[metric]['counter'] = 1
     dictAvg86400[metric]['timestamp'] = timestamp
     pool.dispose();
     
-    
-def read(metric, startTime, endTime):
-    pool = ConnectionPool('Monitor', [address])
-    
-    if timeDiff(startTime, endTime) <= 3600:
+#    if no point between start time and end time, return {}
+#    if no metric , return None
+def read(metric, start_time, end_time, tags):
+    pool = ConnectionPool(keyspace, [address])
+#    decide which column family to read based on time diffrence
+    if timeDiff(start_time, end_time) <= 3600:
         col_fam = pycassa.ColumnFamily(pool, 'rawdata')
-    elif timeDiff(startTime, endTime) <= 7200:
+    elif timeDiff(start_time, end_time) <= 7200:
         col_fam = pycassa.ColumnFamily(pool, 'rollups60')
-    elif timeDiff(startTime, endTime) <= 86400:
+    elif timeDiff(start_time, end_time) <= 86400:
         col_fam = pycassa.ColumnFamily(pool, 'rollups300')
-    elif timeDiff(startTime, endTime) <= 2592000:
+    elif timeDiff(start_time, end_time) <= 2592000:
         col_fam = pycassa.ColumnFamily(pool, 'rollups7200')
     else:
         col_fam = pycassa.ColumnFamily(pool, 'rollups86400') 
-    dict = col_fam.get(metric, column_start=startTime, column_finish=endTime)
+        
+#  change start_time , end_time to uper timestamp
+    start_upertime = start_time/upertime_interval
+    end_updertime = end_time/upertime_interval
+    points = {}
+    for i in range(start_upertime, end_updertime + 1):
+        key = generate_key(metric, i, tags)
+        try:
+            points = col_fam.get(key, column_start=start_time, column_finish=end_time)
+        except pycassa.NotFoundException:
+            return None
     pool.dispose()
-    return dict
+    return points
     
     
-def read_all(metric, column_family):
-    pool = ConnectionPool('Monitor', [address])
+def read_keys(column_family):
+    pool = ConnectionPool(keyspace, [address])
     col_fam = pycassa.ColumnFamily(pool, column_family) 
-    dict = col_fam.get(metric)
-    pool.dispose()
-    return dict
-   
+     # Since get_range() returns a generator - print only the keys.
+    for value in col_fam.get_range(column_count=0,filter_empty=False):
+        print value[0]
 
+def read_keys_and_column(column_family):
+    pool = ConnectionPool(keyspace, [address])
+    col_fam = pycassa.ColumnFamily(pool, column_family) 
+    for value in col_fam.get_range(column_count=0,filter_empty=False):
+        print value[0] 
+        print str( col_fam.get( value[0] ) )
+        print ""
+
+
+def generate_key(metric,upertime, tags):
+    key = metric +'|' + str(upertime) 
+    for k in tags:
+        tag_item = '|' + k + '=' + tags[k]  
+        key += tag_item
+    return key
+        
 
 def caculate(oldAvg, counter, value):
     return oldAvg + (float(value) - float(oldAvg))/(counter+1)
@@ -132,13 +174,13 @@ def convert2month(timestamp):
     return datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m')
 
 def convert2day(timestamp):
-     return datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
+    return datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
     
 def convert2hour(timestamp):
-     return datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H')
+    return datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H')
       
 def convert2min(timestamp):
     return datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M') 
 
 def convert2sec(timestamp):
-    return datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S') 
+    return datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
