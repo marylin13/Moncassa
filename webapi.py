@@ -12,9 +12,10 @@ def write():
     timestamp = request.form['timestamp']
     value = request.form['value']
     tags = request.form['tags']
+    ds_type = request.form['ds_type']
     json_tag = json.loads(tags)
     try:
-        MonCassa.write(metric, long(timestamp), float(value), json_tag)
+        MonCassa.write(metric, long(timestamp), float(value), json_tag, ds_type)
     except Exception as e:
         logging.exception('Some exception occured, values that caused it\n'
                           'metric: %s\ntags: %s\ntimestamp: %s\nvalue: %s' %

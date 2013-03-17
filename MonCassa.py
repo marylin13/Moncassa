@@ -13,12 +13,61 @@ dictAvg60 = defaultdict(lambda : {'counter': 0, 'avg': 0, 'timestamp': 0})
 dictAvg300 = defaultdict(lambda : {'counter': 0, 'avg': 0, 'timestamp': 0})
 dictAvg7200 = defaultdict(lambda : {'counter': 0, 'avg': 0, 'timestamp': 0})
 dictAvg86400 = defaultdict(lambda : {'counter': 0, 'avg': 0, 'timestamp': 0})
+# Key: metric with all tags
+previous_values = {}
 address = 'localhost:9160'
 keyspace = 'monitor'
 upertime_interval = 2592000
 
-def write(metric , timestamp, value, tags):
+def normalize_value(metric, tags, value, timestamp, ds_type):
+    """
+    Normalize a collectd or rrdtool type based value such as COUNTER
+    @param previous_values: A dictionary containing the previous values
+                            of any metric.
+    @return: -1 if this was the first value and the value shouldn't be
+             stored in the database.
+             Else it returns the normalized real value.
+    """
+    global previous_values
+    tags_string = ''.join(['|%s=%s' % (k, v) for k, v in tags.items()])
+    key = metric + tags_string
+    # Check if this is the first value
+    old_value = previous_values.get(key)
+    if ds_type in ('COUNTER', 'DERIVE'):
+        if old_value:
+            if ds_type == 'COUNTER' and value < old_value['value']:
+                raise ValueError("Counter can't become less")
+            else:
+                norm_value = value - old_value['value']
+                interval = timestamp - old_value['time']
+                if interval < 1:
+                    interval = 1
+                norm_value = norm_value / interval
+            previous_values[key] = {'time': timestamp, 'value': value}
+        else:
+            # Add the value to previous values
+            previous_values[key] = {'time': timestamp, 'value': value}
+            raise ValueError("No previous value available so can't save")
+    elif ds_type == 'ABSOLUTE':
+        if old_value:
+            interval = timestamp - old_value['time']
+            norm_value = value/interval
+        else:
+            previous_values[key] = {'time': timestamp, 'value': value}
+            raise ValueError("No previous time available so can't save")
+    else:
+        norm_value = value
+
+    return norm_value
+
+def write(metric, timestamp, value, tags, ds_type):
+    try:
+        value = normalize_value(metric, tags, value, timestamp, ds_type)
+    except ValueError:
+        return
+
     pool = ConnectionPool(keyspace, [address])
+    
     upertime = timestamp/upertime_interval
 #    get key from database, if some id is not exist, create new one
     key = generate_key(metric, upertime, tags) 
@@ -136,11 +185,10 @@ def read_keys_and_column(column_family):
         print ""
 
 
-def generate_key(metric,upertime, tags):
+def generate_key(metric, upertime, tags):
     key = metric +'|' + str(upertime) 
-    for k in tags:
-        tag_item = '|' + k + '=' + tags[k]  
-        key += tag_item
+    tags_string = ''.join(['|%s=%s' % (k, v) for k, v in tags.items()])
+    key += tags_string
     return key
         
 
